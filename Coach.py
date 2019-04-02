@@ -16,7 +16,6 @@ class Coach():
     def __init__(self, game, nnet, args):
         self.game = game
         self.nnet = nnet
-        self.pnet = self.nnet.__class__(self.game)  # the competitor network
         self.args = args
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []    # history of examples from args.numItersForTrainExamplesHistory latest iterations
@@ -66,8 +65,6 @@ class Coach():
         Performs numIters iterations with numEps episodes of self-play in each
         iteration. After every iteration, it retrains neural network with
         examples in trainExamples (which has a maximium length of maxlenofQueue).
-        It then pits the new neural network against the old one and accepts it
-        only if it wins >= updateThreshold fraction of games.
         """
 
         for i in range(1, self.args.numIters+1):
@@ -110,26 +107,42 @@ class Coach():
             shuffle(trainExamples)
 
             # training new network, keeping a copy of the old one
-            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
-            self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
-            pmcts = MCTS(self.game, self.pnet, self.args)
-
+            previous_network_file = 'temp.pth.tar'
+            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=previous_network_file)
             self.nnet.train(trainExamples)
-            nmcts = MCTS(self.game, self.nnet, self.args)
 
-            print('PITTING AGAINST PREVIOUS VERSION')
-            arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
-                          lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game)
-            pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
-
-            print('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
-            if pwins+nwins == 0 or float(nwins)/(pwins+nwins) < self.args.updateThreshold:
+            if not self.pit_previous_network(previous_network_file):
                 print('REJECTING NEW MODEL')
-                self.nnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
-            else:
-                print('ACCEPTING NEW MODEL')
-                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
-                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
+                self.nnet.load_checkpoint(folder=self.args.checkpoint, filename=previous_network_file)
+                return
+
+            print('ACCEPTING NEW MODEL')
+            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
+            self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best.pth.tar')
+
+    def pit_previous_network(self, previous_network_file):
+        """
+        Pits the new neural network against the old one to see
+        if it wins >= updateThreshold fraction of games,
+        then return True.
+
+        If updateThreshold <= 0, return True immediately.
+        """
+
+        if self.args.updateThreshold <= 0:
+            return True
+
+        pnet = self.nnet.__class__(self.game)  # the competitor network
+        pnet.load_checkpoint(folder=self.args.checkpoint, filename=previous_network_file)
+        pmcts = MCTS(self.game, pnet, self.args)
+        nmcts = MCTS(self.game, self.nnet, self.args)
+        print('PITTING AGAINST PREVIOUS VERSION')
+        arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
+                      lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game)
+        pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
+
+        print('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
+        return nwins > self.args.updateThreshold * (pwins+nwins)
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
